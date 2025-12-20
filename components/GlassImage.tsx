@@ -3,7 +3,7 @@
 import { useThree, useFrame } from "@react-three/fiber";
 import { useTexture } from "@react-three/drei";
 import * as THREE from "three";
-import { useRef } from "react";
+import { useRef, useEffect } from "react";
 
 type Props = {
   src: string;
@@ -16,7 +16,9 @@ export default function GlassImage({
 }: Props) {
   const texture = useTexture(src) as THREE.Texture;
   const { size, viewport } = useThree();
+
   const meshRef = useRef<THREE.Mesh>(null);
+  const target = useRef(new THREE.Vector3());
 
   if (
     !texture.image ||
@@ -35,45 +37,57 @@ export default function GlassImage({
   const worldWidth =
     imgWidth * scaleFactor * (viewport.width / size.width);
 
-  // 🔥 SPACING (UNCHANGED)
+  // 🔥 CHAIN SPACING (UNCHANGED)
   const X = 0.135;
   const Y = 0.035;
   const Z = -0.09;
 
-  // 🔥 SLOT LOGIC (YOUR RULES)
-  let slot = 0;
-  if (relativeIndex === 0) slot = 0;
-  else if (relativeIndex % 2 === 1)
-    slot = -Math.ceil(relativeIndex / 2);
-  else
-    slot = Math.ceil(relativeIndex / 2);
+  // 🔥 VISIBILITY WINDOW
+  const MAX_VISIBLE = 4;
+  const isVisible =
+    Math.abs(relativeIndex) <= MAX_VISIBLE;
 
-  const target = new THREE.Vector3(
-    slot * X,
-    slot * Y,
-    slot * Z
-  );
+  // Update target position only when index changes
+  useEffect(() => {
+    target.current.set(
+      relativeIndex * X,
+      relativeIndex * Y,
+      relativeIndex * Z
+    );
+  }, [relativeIndex]);
 
-  // ✅ REAL SMOOTH ANIMATION
   useFrame((_, delta) => {
     if (!meshRef.current) return;
 
+    // Smooth position animation
     meshRef.current.position.x = THREE.MathUtils.damp(
       meshRef.current.position.x,
-      target.x,
+      target.current.x,
       8,
       delta
     );
     meshRef.current.position.y = THREE.MathUtils.damp(
       meshRef.current.position.y,
-      target.y,
+      target.current.y,
       8,
       delta
     );
     meshRef.current.position.z = THREE.MathUtils.damp(
       meshRef.current.position.z,
-      target.z,
+      target.current.z,
       8,
+      delta
+    );
+
+    // 🔥 Smooth visibility fade
+    const mat =
+      meshRef.current
+        .material as THREE.MeshPhysicalMaterial;
+
+    mat.opacity = THREE.MathUtils.damp(
+      mat.opacity,
+      isVisible ? 1 : 0,
+      10,
       delta
     );
   });
@@ -82,6 +96,7 @@ export default function GlassImage({
     <mesh
       ref={meshRef}
       rotation={[0, -Math.PI / 6, 0]}
+      renderOrder={1000 - relativeIndex}
     >
       <boxGeometry args={[worldWidth, worldHeight, 0.004]} />
       <meshPhysicalMaterial
@@ -94,6 +109,10 @@ export default function GlassImage({
         clearcoat={1}
         clearcoatRoughness={0.05}
         transparent
+        depthWrite={false}
+        polygonOffset
+        polygonOffsetFactor={-1}
+        polygonOffsetUnits={-1}
         toneMapped={false}
       />
     </mesh>
