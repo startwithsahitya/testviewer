@@ -1,130 +1,166 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { useThree } from "@react-three/fiber";
+import { useState, useRef, useEffect } from "react";
+import { useThree, useFrame } from "@react-three/fiber";
+import * as THREE from "three";
 import GlassImage from "./GlassImage";
+import { hoverables, hoverState } from "./hoverStore";
+import { ImageItem } from "../types/image";
+import { getCachedImage } from "../utils/imageCache";
 
-type Props = {
-  images: string[];
-};
+type Props = { images: ImageItem[] };
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
 
 function buildInitialOrder(count: number) {
   const odds: number[] = [];
   const evens: number[] = [];
-
   for (let i = 1; i <= count; i++) {
     if (i === 1) continue;
-    if (i % 2 === 1) odds.push(i);
-    else evens.push(i);
+    i % 2 ? odds.push(i) : evens.push(i);
   }
-
   return [...odds.reverse(), 1, ...evens];
 }
 
 export default function Scene({ images }: Props) {
-  const { viewport } = useThree();
+  const { viewport, camera } = useThree();
 
-  const [order, setOrder] = useState<number[]>(
-    buildInitialOrder(images.length)
-  );
+  const [order, setOrder] = useState(buildInitialOrder(images.length));
+  const [selected, setSelected] = useState<string | null>(null);
+
+  useEffect(() => {
+    images.forEach((img) => {
+      getCachedImage(img.url).catch(() => {});
+    });
+  }, [images]);
 
   // ======================
-  // PRESS + MOVE STATE
+  // DRAG STATE
   // ======================
-  const isHolding = useRef(false);
+  const holding = useRef(false);
   const lastY = useRef(0);
-  const accumulated = useRef(0);
+  const acc = useRef(0);
 
-  // ======================
-  // TUNING (IMPORTANT)
-  // ======================
-  const DRAG_SENSITIVITY = 1;   // mouse response
-  const PIXELS_PER_STEP = 16;     // smaller = smoother
-  const MAX_STEPS_PER_MOVE = 3;   // safety
+  const ROTATE_THRESHOLD = 26;
+  const WHEEL_SENSITIVITY = 0.35;
+  const wheelAcc = useRef(0);
 
-  const rotateOnce = (dir: 1 | -1) => {
+  const rotate = (dir: 1 | -1) => {
+    setOrder((o) => {
+      const n = [...o];
+      dir === 1 ? n.push(n.shift()!) : n.unshift(n.pop()!);
+      return n;
+    });
+  };
+
+  // 🔑 CLICK → CHAIN TO CENTER
+  const rotateIndexToCenter = (clickedIndex: number) => {
     setOrder((prev) => {
       const next = [...prev];
-      if (dir === 1) next.push(next.shift()!);
-      else next.unshift(next.pop()!);
+      const mid = Math.floor(next.length / 2);
+      let idx = clickedIndex;
+
+      while (idx !== mid) {
+        if (idx > mid) {
+          next.push(next.shift()!);
+          idx--;
+        } else {
+          next.unshift(next.pop()!);
+          idx++;
+        }
+      }
+
       return next;
     });
   };
 
+  // ======================
+  // HOVER RAYCAST
+  // ======================
+  useFrame(() => {
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects(
+      hoverables.map((h) => h.mesh)
+    );
+
+    const id =
+      hits.length > 0
+        ? hoverables.find((h) => h.mesh === hits[0].object)?.id ?? null
+        : null;
+
+    if (id !== hoverState.activeId) {
+      hoverables.forEach((h) => h.setHovered(h.id === id));
+      hoverState.activeId = id;
+    }
+  });
+
   return (
     <>
-      {/* ======================
-         FULLSCREEN HIT PLANE
-         ====================== */}
+      {selected && (
+        <mesh onClick={() => setSelected(null)}>
+          <planeGeometry args={[viewport.width, viewport.height]} />
+          <meshBasicMaterial transparent opacity={0} />
+        </mesh>
+      )}
+
       <mesh
-        position={[0, 0, 0]}
         onPointerDown={(e) => {
-          isHolding.current = true;
+          holding.current = true;
           lastY.current = e.clientY;
-          accumulated.current = 0;
-          document.body.style.cursor = "grabbing";
+          acc.current = 0;
         }}
         onPointerMove={(e) => {
-          if (!isHolding.current) return;
+          mouse.x = (e.clientX / innerWidth) * 2 - 1;
+          mouse.y = -(e.clientY / innerHeight) * 2 + 1;
 
-          const dy = (e.clientY - lastY.current) * DRAG_SENSITIVITY;
+          if (!holding.current || selected) return;
+
+          acc.current += e.clientY - lastY.current;
           lastY.current = e.clientY;
 
-          accumulated.current += dy;
-
-          let steps = 0;
-
-          while (
-            accumulated.current > PIXELS_PER_STEP &&
-            steps < MAX_STEPS_PER_MOVE
-          ) {
-            rotateOnce(1);
-            accumulated.current -= PIXELS_PER_STEP;
-            steps++;
-          }
-
-          while (
-            accumulated.current < -PIXELS_PER_STEP &&
-            steps < MAX_STEPS_PER_MOVE
-          ) {
-            rotateOnce(-1);
-            accumulated.current += PIXELS_PER_STEP;
-            steps++;
+          if (Math.abs(acc.current) > ROTATE_THRESHOLD) {
+            rotate(acc.current > 0 ? 1 : -1);
+            acc.current = 0;
           }
         }}
-        onPointerUp={() => {
-          isHolding.current = false;
-          accumulated.current = 0;
-          document.body.style.cursor = "default";
-        }}
-        onPointerLeave={() => {
-          isHolding.current = false;
-          accumulated.current = 0;
-          document.body.style.cursor = "default";
-        }}
+        onPointerUp={() => (holding.current = false)}
+        onPointerLeave={() => (holding.current = false)}
         onWheel={(e) => {
-          rotateOnce(e.deltaY > 0 ? 1 : -1);
+          if (selected) return;
+
+          wheelAcc.current += e.deltaY * WHEEL_SENSITIVITY;
+          if (Math.abs(wheelAcc.current) > 40) {
+            rotate(wheelAcc.current > 0 ? 1 : -1);
+            wheelAcc.current = 0;
+          }
         }}
       >
         <planeGeometry args={[viewport.width, viewport.height]} />
         <meshBasicMaterial transparent opacity={0} />
       </mesh>
 
-      {/* ======================
-         IMAGE CHAIN
-         ====================== */}
-      {order.map((label, positionIndex) => {
-        const imageIndex = label - 1;
-        const middle = Math.floor(order.length / 2);
-
-        const relativeIndex =
-          positionIndex - middle;
+      {order.map((label, i) => {
+        const img = images[label - 1];
+        const mid = Math.floor(order.length / 2);
+        const relativeIndex = i - mid;
+        const isCenter = relativeIndex === 0;
 
         return (
           <GlassImage
-            key={images[imageIndex]}
-            src={images[imageIndex]}
+            key={img.id}
+            id={img.id}
+            url={img.url}
             relativeIndex={relativeIndex}
+            isSelected={selected === img.id}
+            isHidden={selected !== null && selected !== img.id}
+            onClickImage={() => {
+              if (isCenter) {
+                setSelected((p) => (p === img.id ? null : img.id));
+              } else {
+                rotateIndexToCenter(i);
+              }
+            }}
           />
         );
       })}
